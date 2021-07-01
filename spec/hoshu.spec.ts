@@ -8,9 +8,9 @@ describe(`Test by actual data (A)`, () => {
   it(`Compare with actual data (A)`, async done => {
     const hoshu = new Hoshu();
 
-    const json1 = await hoshu.fetch('https://code4history.dev/TatebayashiStones/tatebayashi_stones.geojson');
-    console.log(json1);
-    const json2 = await hoshu.fetch('../TatebayashiStones/tatebayashi_stones.geojson');
+    const json1 = await hoshu.fetch('https://code4history.dev/TatebayashiStones/pois.geojson');
+    console.log(JSON.stringify(json1.features[0]));
+    const json2 = await hoshu.fetch('../TatebayashiStones/pois.geojson');
     console.log(json2);
     const json3 = await hoshu.fetch('https://example.com/hoge.json');
     console.log(json3);
