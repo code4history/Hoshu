@@ -4,7 +4,50 @@ import {URL, pathToFileURL, fileURLToPath} from 'url';
 import path from 'path';
 import fs from 'fs-extra';
 
-type FetchLogic = (pathString: string) => Promise<any>;
+/*export type RelationsSetting = {
+  resources: {
+    [table: string]: string
+  },
+  relations: {
+    [table: string]: {
+      [resource: string]: {
+        is_many: boolean,
+        resource: string,
+        relations: {
+          [source: string]: string
+        }
+      }
+    }
+  },
+  attributes: {
+    [table: string]: {
+      [attr: string]: string
+    }
+  },
+  keep?: string[],
+  delete?: string[]
+};*/
+
+export type RelationsSetting = {
+  resources: {
+    [table: string]: string
+  },
+  relations: {
+    [table_attr: string]: {
+      is_many: boolean,
+      resource: string,
+      relations: {
+        [source: string]: string
+      }
+    }
+  },
+  attributes: {
+    [table_attr: string]: string
+  },
+  keep?: string[],
+  delete?: string[],
+  id?: string
+};
 
 export default class Hoshu {
   private isNode = false;
@@ -14,7 +57,7 @@ export default class Hoshu {
     if (browser && browser.type === 'node') this.isNode = true;
   }
 
-  async fetch(pathStr: string): Promise<any> {
+  async fetch(pathStr: string, relDefs?: RelationsSetting): Promise<any> {
     let pathUrl: URL;
     if (this.isNode && !pathStr.match(/^https?:\/\//)) {
       pathUrl = pathToFileURL(pathStr);
@@ -22,7 +65,7 @@ export default class Hoshu {
       pathUrl = new URL(pathStr, !this.isNode ? location.href : undefined);
     }
     const json = await this.fetchUrl(pathUrl);
-    const defs = json['hoshu:relation'];
+    const defs = relDefs || json['hoshu:relation'] as RelationsSetting | undefined;
     const tables: any = {
       main: json
     };
@@ -31,94 +74,82 @@ export default class Hoshu {
       main: []
     };
     if (defs) {
-      // Dummy data creation
-      defs.keep = ['main.fid'];
-      defs.delete = ['refs.fid'];
-      defs.attributes = {
-        refs: {
-          name: '_books.name',
-          editor: '_books.editor',
-          publishedAt: '_books.publishedAt'
-        }
-      };
-
-      if (!defs.keep) defs.keep = [];
-      if (!defs.delete) defs.delete = [];
+      const keepArr = defs.keep || [];
+      const deleteArr = defs.delete || [];
+      const idAttr = defs.id || 'fid';
 
       // Process 1: Fetch sub tables
       const resources = defs.resources;
       await Promise.all(Object.keys(resources).map(async (key) => {
         const subUrl = new URL(resources[key], pathUrl);
         tables[key] = await this.fetchUrl(subUrl);
-        deleteAttrs[key] = [];
+        deleteAttrs[key] = [idAttr];
       }));
-      defs.delete.forEach((tableAttr: string) => {
+      deleteArr.forEach((tableAttr: string) => {
         const [tableName, attr] = tableAttr.split('.');
         deleteAttrs[tableName].push(attr);
       });
 
       // Process 2: Make relationships of tables
       const relations = defs.relations;
-      Object.keys(relations).forEach((tableName) => {
+      Object.keys(relations).forEach((tableAttr) => {
+        const [tableName, attr] = tableAttr.split('.');
         const table = tables[tableName];
-        const rels = relations[tableName];
-        Object.keys(rels).forEach((attr) => {
-          const relSetting = rels[attr];
-          const resource = tables[relSetting.resource];
-          if (deleteAttrs[tableName].indexOf(attr) === -1 && attr.match(/^_/)) deleteAttrs[tableName].push(attr);
-          table.features.forEach((item: any) => {
-            item.properties[attr] = resource.features.reduce((prev: any, resItem: any) => {
-              if (prev && !relSetting.is_many) return prev;
-              else if (relSetting.is_many && !prev) prev = [];
-              const flag = Object.keys(relSetting.relations).reduce((prev:boolean, key) => {
-                return prev && (item.properties[key] === resItem.properties[relSetting.relations[key]]);
-              }, true);
-              if (flag) {
-                if (!relSetting.is_many) return resItem.properties;
-                prev.push(resItem.properties);
-              }
-              return prev;
-            }, undefined);
-          });
-          // Create deletion list
-          Object.keys(relSetting.relations).forEach((key) => {
-            const resKey = relSetting.relations[key];
-            if (deleteAttrs[tableName].indexOf(key) === -1 &&
-              defs.keep.indexOf(`${tableName}.${key}`) === -1) deleteAttrs[tableName].push(key);
-            if (deleteAttrs[relSetting.resource].indexOf(resKey) === -1 &&
-              defs.keep.indexOf(`${relSetting.resource}.${resKey}`) === -1) deleteAttrs[relSetting.resource].push(resKey);
-          });
+        const relSetting = relations[tableAttr];
+        const resource = tables[relSetting.resource];
+        if (deleteAttrs[tableName].indexOf(attr) === -1 && attr.match(/^_/)) deleteAttrs[tableName].push(attr);
+        table.features.forEach((item: any) => {
+          item.properties[attr] = resource.features.reduce((prev: any, resItem: any) => {
+            if (prev && !relSetting.is_many) return prev;
+            else if (relSetting.is_many && !prev) prev = [];
+            const flag = Object.keys(relSetting.relations).reduce((prev:boolean, key) => {
+              return prev && (item.properties[key] === resItem.properties[relSetting.relations[key]]);
+            }, true);
+            if (flag) {
+              if (!relSetting.is_many) return resItem.properties;
+              prev.push(resItem.properties);
+            }
+            return prev;
+          }, undefined);
+        });
+        // Create deletion list
+        Object.keys(relSetting.relations).forEach((key) => {
+          const resKey = relSetting.relations[key];
+          if (deleteAttrs[tableName].indexOf(key) === -1 &&
+            keepArr.indexOf(`${tableName}.${key}`) === -1 && tableName !== 'main') deleteAttrs[tableName].push(key);
+          if (deleteAttrs[relSetting.resource].indexOf(resKey) === -1 &&
+            keepArr.indexOf(`${relSetting.resource}.${resKey}`) === -1 && relSetting.resource !== 'main') deleteAttrs[relSetting.resource].push(resKey);
         });
       });
-    }
 
-    // Process 3: Alias for attributes
-    const attributes = defs.attributes;
-    Object.keys(attributes).forEach((tableName) => {
-      const table = tables[tableName];
-      const attrs = attributes[tableName];
-      Object.keys(attrs).forEach((attr) => {
-        const source = attrs[attr];
+      // Process 3: Alias for attributes
+      const attributes = defs.attributes;
+      Object.keys(attributes).forEach((tableAttr) => {
+        const [tableName, attr] = tableAttr.split('.');
+        const table = tables[tableName];
+        const source = attributes[tableAttr];
         const [resource, resAttr] = source.split('.');
         table.features.forEach((item: any) => {
           item.properties[attr] = item.properties[resource][resAttr];
         });
       });
-    });
+      console.log(deleteAttrs);
 
-    // Process 4: Delete attributes
-    Object.keys(deleteAttrs).forEach((tableName) => {
-      const table = tables[tableName];
-      const delList = deleteAttrs[tableName];
-      if (delList.length > 0) {
-        table.features.forEach((item: any) => {
-          delList.forEach((delKey: string) => {
-            delete item.properties[delKey];
+      // Process 4: Delete attributes
+      Object.keys(deleteAttrs).forEach((tableName) => {
+        const table = tables[tableName];
+        const delList = deleteAttrs[tableName];
+        if (delList.length > 0) {
+          table.features.forEach((item: any) => {
+            delList.forEach((delKey: string) => {
+              delete item.properties[delKey];
+            });
           });
-        });
-      }
-    });
+        }
+      });
+    }
 
+    delete json['hoshu:relation'];
     return json;
   }
 
